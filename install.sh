@@ -56,17 +56,12 @@ case $PKG_MANAGER in
 esac
 
 echo ""
-echo -e "${GREEN}Phase 5: Installing Python dependencies${NC}"
-
-pip install --quiet requests 2>/dev/null || pip3 install --quiet requests 2>/dev/null
-
-echo ""
-echo -e "${GREEN}Phase 6: Installing lyrix to /usr/bin${NC}"
+echo -e "${GREEN}Phase 5: Installing lyrix to /usr/bin${NC}"
 
 sudo cp lyrix.py /usr/bin/lyrix
 sudo chmod +x /usr/bin/lyrix
 
 echo ""
-echo -e "${GREEN}Phase 7: Installation complete${NC}"
+echo -e "${GREEN}Phase 6: Installation complete${NC}"
 
 echo -e "Run ${CYAN}lyrix${NC} to start."

@@ -4,7 +4,7 @@
 # Installation
 
 ```bash
-git clone https://github.com/d1ezz9/lyrix && cd lyrix && chmod +x ./install.sh & ./install.sh
+git clone https://github.com/d1ezz9/lyrix && cd lyrix && chmod +x ./install.sh && ./install.sh
 ```
 
 # Screenshots

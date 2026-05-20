@@ -1,5 +1,6 @@
 # lyrix
 ## useless, but cool stuff
+### just song lyrics in the terminal
 
 # Installation
 

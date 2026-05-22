@@ -10,8 +10,6 @@ from urllib.parse import quote
 
 OFFSET = -0.3
 
-LRC_PATTERN = re.compile(r'\[(\d{2}):(\d{2})(?:\.(\d{2,3}))?\]\s*(.*)')
-
 CLEAR_SCREEN = "\033[2J\033[H"
 HIDE_CURSOR = "\033[?25l"
 SHOW_CURSOR = "\033[?25h"
@@ -19,12 +17,18 @@ RESET = "\033[0m"
 COLOR_GRAY = "\033[90m"
 COLOR_BRIGHT_WHITE = "\033[1;97m"
 
+TIMESTAMP_RE = re.compile(r'\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]')
+
 def get_track():
     try:
-        result = subprocess.run(["playerctl", "metadata", "-f", "{{artist}}|{{title}}"], capture_output=True, text=True, timeout=1)
+        result = subprocess.run(["playerctl", "metadata", "-f", "{{artist}}|{{title}}"],
+                                capture_output=True, text=True, timeout=1)
         if result.returncode == 0 and result.stdout.strip():
-            parts = result.stdout.strip().split('|')
-            return parts[0], parts[1]
+            parts = result.stdout.strip().split('|', 1)
+            artist = parts[0].strip() if parts else None
+            title = parts[1].strip() if len(parts) > 1 else None
+            if artist and title:
+                return artist, title
     except (subprocess.TimeoutExpired, FileNotFoundError, IndexError):
         pass
     return None, None
@@ -32,11 +36,23 @@ def get_track():
 def get_lyrics(artist, title):
     url = f"https://lrclib.net/api/get?track_name={quote(title)}&artist_name={quote(artist)}"
     try:
-        result = subprocess.run(["curl", "-s", "--max-time", "2", url], capture_output=True, text=True, timeout=3)
-        if result.returncode == 0:
-            data = json.loads(result.stdout)
-            return data.get('syncedLyrics')
-    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
+        result = subprocess.run(["curl", "-s", "--max-time", "5", url],
+                                capture_output=True, text=True, timeout=6)
+        if result.returncode == 0 and result.stdout.strip():
+            try:
+                data = json.loads(result.stdout)
+                if not isinstance(data, dict):
+                    return None
+                synced = data.get("syncedLyrics")
+                if synced and isinstance(synced, str) and synced.strip():
+                    return synced.strip()
+                plain = data.get("plainLyrics")
+                if plain and isinstance(plain, str) and plain.strip():
+                    return plain.strip()
+                return None
+            except json.JSONDecodeError:
+                return None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
     return None
 
@@ -44,24 +60,48 @@ def parse_lrc(text):
     lines = []
     if not text:
         return lines
-    for line in text.split('\n'):
-        match = LRC_PATTERN.match(line)
-        if match:
-            minutes, seconds = int(match.group(1)), int(match.group(2))
-            millis_str = match.group(3) or "0"
-            millis = int(millis_str)
-            if len(millis_str) < 3:
-                millis *= 10
-            time_seconds = minutes * 60 + seconds + millis / 1000 + OFFSET
-            lines.append({'time': time_seconds, 'text': match.group(4).strip()})
-    return sorted(lines, key=lambda x: x['time'])
+
+    has_timestamps = False
+    raw_lines = []
+
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        matches = TIMESTAMP_RE.findall(line)
+        if matches:
+            has_timestamps = True
+            lyric_text = re.sub(r'^(?:\[[^\]]+\])+', '', line).strip()
+            for m in matches:
+                minutes = int(m[0])
+                seconds = int(m[1])
+                millis_str = m[2] if m[2] else "0"
+                if len(millis_str) == 1:
+                    millis = int(millis_str) * 100
+                elif len(millis_str) == 2:
+                    millis = int(millis_str) * 10
+                else:
+                    millis = int(millis_str)
+                time_seconds = minutes * 60 + seconds + millis / 1000.0 + OFFSET
+                raw_lines.append({'time': time_seconds, 'text': lyric_text})
+        else:
+            raw_lines.append({'time': None, 'text': line})
+
+    if not has_timestamps:
+        return [{'time': None, 'text': item['text']} for item in raw_lines]
+
+    synced = [l for l in raw_lines if l.get('time') is not None]
+    synced = sorted(synced, key=lambda x: x['time'])
+    return synced
 
 def get_pos():
     try:
         res = subprocess.run(["playerctl", "position"], capture_output=True, text=True, timeout=1)
-        return float(res.stdout.strip())
+        if res.returncode == 0 and res.stdout.strip():
+            return float(res.stdout.strip())
     except (subprocess.TimeoutExpired, ValueError, FileNotFoundError):
-        return 0.0
+        pass
+    return 0.0
 
 def get_terminal_size():
     try:
@@ -71,40 +111,104 @@ def get_terminal_size():
         return 24, 80
 
 def wrap_text(text, cols):
+    if not text:
+        return [""]
+    if cols <= 0:
+        return [text]
     if len(text) <= cols:
         return [text]
     words = text.split()
     lines = []
     current_line = ""
     for word in words:
-        if len(current_line) + len(word) + 1 <= cols:
-            current_line += (word if not current_line else " " + word)
+        if not current_line:
+            if len(word) > cols:
+                start = 0
+                while start < len(word):
+                    part = word[start:start + cols]
+                    lines.append(part)
+                    start += cols
+            else:
+                current_line = word
+        elif len(current_line) + 1 + len(word) <= cols:
+            current_line += " " + word
         else:
-            if current_line:
-                lines.append(current_line)
-            current_line = word
+            lines.append(current_line)
+            if len(word) > cols:
+                start = 0
+                while start < len(word):
+                    part = word[start:start + cols]
+                    lines.append(part)
+                    start += cols
+                current_line = ""
+            else:
+                current_line = word
     if current_line:
         lines.append(current_line)
-    return lines if lines else [text[:cols]]
+    return lines if lines else [""]
 
-def draw_lyrics(center_y, prev_text, curr_text, next_text):
-    rows, cols = get_terminal_size()
+def draw_synced(center_y, prev_text, curr_text, next_text, cols):
     sys.stdout.write(CLEAR_SCREEN)
-    prev_lines = wrap_text(prev_text, cols) if prev_text else [""]
-    curr_lines = wrap_text(curr_text, cols) if curr_text else [""]
-    next_lines = wrap_text(next_text, cols) if next_text else [""]
-    prev_display = prev_lines[-1] if prev_lines else ""
-    curr_display = curr_lines[0] if curr_lines else ""
-    next_display = next_lines[0] if next_lines else ""
+    prev_display = (wrap_text(prev_text, cols)[-1] if prev_text else "")
+    curr_display = (wrap_text(curr_text, cols)[0] if curr_text else "")
+    next_display = (wrap_text(next_text, cols)[0] if next_text else "")
     prev_x = max(0, (cols - len(prev_display)) // 2)
     curr_x = max(0, (cols - len(curr_display)) // 2)
     next_x = max(0, (cols - len(next_display)) // 2)
-    sys.stdout.write(f"\033[{center_y - 1};{prev_x + 1}H{COLOR_GRAY}{prev_display}{RESET}")
-    sys.stdout.write(f"\033[{center_y};{curr_x + 1}H{COLOR_BRIGHT_WHITE}{curr_display}{RESET}")
-    sys.stdout.write(f"\033[{center_y + 1};{next_x + 1}H{COLOR_GRAY}{next_display}{RESET}")
+    try:
+        sys.stdout.write(f"\033[{center_y - 1};{prev_x + 1}H{COLOR_GRAY}{prev_display}{RESET}")
+        sys.stdout.write(f"\033[{center_y};{curr_x + 1}H{COLOR_BRIGHT_WHITE}{curr_display}{RESET}")
+        sys.stdout.write(f"\033[{center_y + 1};{next_x + 1}H{COLOR_GRAY}{next_display}{RESET}")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+def draw_plain(lines, scroll_offset, rows, cols):
+    sys.stdout.write(CLEAR_SCREEN)
+    visible_lines = rows - 2
+    start = scroll_offset
+    end = min(start + visible_lines, len(lines))
+    display_start_row = 2
+    for i, line_text in enumerate(lines[start:end]):
+        row = display_start_row + i
+        wrapped = wrap_text(line_text, cols)
+        text = wrapped[0] if wrapped else ""
+        x = max(0, (cols - len(text)) // 2)
+        sys.stdout.write(f"\033[{row};{x + 1}H{COLOR_BRIGHT_WHITE}{text}{RESET}")
+    hint = "[ scroll: arrow up/down or j/k ]"
+    hx = max(0, (cols - len(hint)) // 2)
+    sys.stdout.write(f"\033[{rows};{hx + 1}H{COLOR_GRAY}{hint}{RESET}")
     sys.stdout.flush()
 
-def cleanup(sig, frame):
+def set_terminal_raw(enabled):
+    import termios, tty
+    global _old_term_settings
+    fd = sys.stdin.fileno()
+    if enabled:
+        _old_term_settings = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+    else:
+        termios.tcsetattr(fd, termios.TCSADRAIN, _old_term_settings)
+
+def read_key_nonblocking():
+    import select
+    if select.select([sys.stdin], [], [], 0)[0]:
+        ch = sys.stdin.read(1)
+        if ch == '\x1b':
+            if select.select([sys.stdin], [], [], 0.05)[0]:
+                ch2 = sys.stdin.read(1)
+                if ch2 == '[':
+                    if select.select([sys.stdin], [], [], 0.05)[0]:
+                        ch3 = sys.stdin.read(1)
+                        return 'ESC_' + ch3
+        return ch
+    return None
+
+def cleanup(sig=None, frame=None):
+    try:
+        set_terminal_raw(False)
+    except Exception:
+        pass
     sys.stdout.write(CLEAR_SCREEN + SHOW_CURSOR)
     sys.stdout.flush()
     sys.exit(0)
@@ -112,10 +216,19 @@ def cleanup(sig, frame):
 signal.signal(signal.SIGINT, cleanup)
 signal.signal(signal.SIGTERM, cleanup)
 
+_old_term_settings = None
+
 last_track = ""
 lines = []
 last_idx = -2
 last_pos = -1.0
+is_plain_mode = False
+plain_scroll = 0
+
+try:
+    set_terminal_raw(True)
+except Exception:
+    pass
 
 sys.stdout.write(HIDE_CURSOR)
 sys.stdout.flush()
@@ -129,19 +242,51 @@ while True:
             last_track = track
             last_idx = -2
             last_pos = -1.0
-            lines = parse_lrc(get_lyrics(artist, title)) if artist and title else []
+            plain_scroll = 0
+            if artist and title:
+                raw_lines = parse_lrc(get_lyrics(artist, title))
+            else:
+                raw_lines = []
+
+            if raw_lines and raw_lines[0]['time'] is None:
+                is_plain_mode = True
+                lines = [l['text'] for l in raw_lines]
+            else:
+                is_plain_mode = False
+                lines = raw_lines
+
             rows, cols = get_terminal_size()
             center_y = rows // 2
             sys.stdout.write(CLEAR_SCREEN)
             if not lines:
                 msg = "No lyrics found"
                 x = max(0, (cols - len(msg)) // 2)
-                sys.stdout.write(f"\033[{center_y};{x + 1}H{msg}")
-            sys.stdout.flush()
+                sys.stdout.write(f"\033[{center_y};{x + 1}H{COLOR_GRAY}{msg}{RESET}")
+                sys.stdout.flush()
+            elif is_plain_mode:
+                draw_plain(lines, plain_scroll, rows, cols)
 
-        if lines:
+        key = read_key_nonblocking()
+        if key in ('q', 'Q'):
+            cleanup()
+
+        if is_plain_mode and lines:
+            rows, cols = get_terminal_size()
+            visible_lines = rows - 2
+            max_scroll = max(0, len(lines) - visible_lines)
+            scrolled = False
+            if key in ('ESC_A', 'k', 'K'):
+                plain_scroll = max(0, plain_scroll - 1)
+                scrolled = True
+            elif key in ('ESC_B', 'j', 'J'):
+                plain_scroll = min(max_scroll, plain_scroll + 1)
+                scrolled = True
+            if scrolled:
+                draw_plain(lines, plain_scroll, rows, cols)
+
+        if not is_plain_mode and lines:
             pos = get_pos()
-            is_seeked = abs(pos - last_pos) > 1.0
+            is_seeked = abs(pos - last_pos) > 2.0 and last_pos >= 0
             idx = -1
             for i, line in enumerate(lines):
                 if line['time'] <= pos:
@@ -153,9 +298,9 @@ while True:
                 rows, cols = get_terminal_size()
                 center_y = rows // 2
                 prev_text = lines[idx - 1]['text'] if idx > 0 else ""
-                curr_text = lines[idx]['text'] if idx >= 0 else ""
+                curr_text = lines[idx]['text'] if 0 <= idx < len(lines) else ""
                 next_text = lines[idx + 1]['text'] if idx + 1 < len(lines) else ""
-                draw_lyrics(center_y, prev_text, curr_text, next_text)
+                draw_synced(center_y, prev_text, curr_text, next_text, cols)
                 last_idx = idx
                 last_pos = pos
 
@@ -165,3 +310,5 @@ while True:
     except Exception as e:
         sys.stderr.write(f"Error: {e}\n")
         time.sleep(0.5)
+
+cleanup()

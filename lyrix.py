@@ -6,7 +6,11 @@ import json
 import sys
 import signal
 import os
-from urllib.parse import quote
+import urllib.request
+import urllib.parse
+import concurrent.futures
+
+LYRICS_CACHE = {}
 
 OFFSET = -0.3
 
@@ -34,26 +38,32 @@ def get_track():
     return None, None
 
 def get_lyrics(artist, title):
-    url = f"https://lrclib.net/api/get?track_name={quote(title)}&artist_name={quote(artist)}"
-    try:
-        result = subprocess.run(["curl", "-s", "--max-time", "5", url],
-                                capture_output=True, text=True, timeout=6)
-        if result.returncode == 0 and result.stdout.strip():
-            try:
-                data = json.loads(result.stdout)
-                if not isinstance(data, dict):
-                    return None
-                synced = data.get("syncedLyrics")
-                if synced and isinstance(synced, str) and synced.strip():
-                    return synced.strip()
-                plain = data.get("plainLyrics")
-                if plain and isinstance(plain, str) and plain.strip():
-                    return plain.strip()
-                return None
-            except json.JSONDecodeError:
-                return None
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+    key = f"{artist.lower()}|{title.lower()}"
+    if key in LYRICS_CACHE:
+        return LYRICS_CACHE[key]
+    
+    clean_artist = artist.strip()
+    clean_title = title.strip()
+    search_url = f"https://lrclib.net/api/search?track_name={urllib.parse.quote(clean_title)}&artist_name={urllib.parse.quote(clean_artist)}"
+    
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(search_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=15) as response:
+                if response.status == 200:
+                    data = json.loads(response.read().decode('utf-8'))
+                    if isinstance(data, list) and len(data) > 0:
+                        for item in data:
+                            if item.get("syncedLyrics") or item.get("plainLyrics"):
+                                res = (item.get("syncedLyrics") or item.get("plainLyrics")).strip()
+                                LYRICS_CACHE[key] = res
+                                return res
+            return None
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(1)
+                continue
+            return None
     return None
 
 def parse_lrc(text):
@@ -105,9 +115,9 @@ def get_pos():
 
 def get_terminal_size():
     try:
-        rows, cols = os.popen('stty size', 'r').read().split()
-        return int(rows), int(cols)
-    except (ValueError, OSError):
+        size = os.get_terminal_size()
+        return size.lines, size.columns
+    except (AttributeError, OSError):
         return 24, 80
 
 def wrap_text(text, cols):
@@ -216,6 +226,14 @@ def cleanup(sig=None, frame=None):
 signal.signal(signal.SIGINT, cleanup)
 signal.signal(signal.SIGTERM, cleanup)
 
+def check_dependencies():
+    for cmd in ["playerctl"]:
+        if subprocess.run(["which", cmd], capture_output=True).returncode != 0:
+            print(f"Error: Required dependency '{cmd}' not found.")
+            sys.exit(1)
+
+check_dependencies()
+
 _old_term_settings = None
 
 last_track = ""
@@ -244,7 +262,9 @@ while True:
             last_pos = -1.0
             plain_scroll = 0
             if artist and title:
-                raw_lines = parse_lrc(get_lyrics(artist, title))
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(get_lyrics, artist, title)
+                    raw_lines = parse_lrc(future.result())
             else:
                 raw_lines = []
 

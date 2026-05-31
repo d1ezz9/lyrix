@@ -48,11 +48,11 @@ echo ""
 echo -e "${GREEN}Phase 4: Installing dependencies${NC}"
 
 case $PKG_MANAGER in
-    pacman) sudo pacman -S --noconfirm python python-pip playerctl curl ;;
-    apt)    sudo apt install -y python3 python3-pip playerctl curl ;;
-    dnf)    sudo dnf install -y python3 python3-pip playerctl curl ;;
-    zypper) sudo zypper install -y python3 python3-pip playerctl curl ;;
-    xbps)   sudo xbps-install -y python3 python3-pip playerctl curl ;;
+    pacman) sudo pacman -S --noconfirm python python-pip playerctl ;;
+    apt)    sudo apt install -y python3 python3-pip playerctl ;;
+    dnf)    sudo dnf install -y python3 python3-pip playerctl ;;
+    zypper) sudo zypper install -y python3 python3-pip playerctl ;;
+    xbps)   sudo xbps-install -y python3 python3-pip playerctl ;;
 esac
 
 echo ""
